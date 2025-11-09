@@ -3,6 +3,7 @@
 ## **Project Summary**
 
 This project consists of a Python script (simplestream-quad-audio-mixer.py) that acts as a real-time, multi-call audio mixer for [trunk-recorder](https://github.com/robotastic/trunk-recorder).  
+
 It listens on a UDP port for trunk-recorder's simpleStream JSON events. As multiple, concurrent calls (call\_start, audio, call\_end) are received, it mixes them into a single, continuous 4-channel (quadraphonic) raw audio stream.  
 
 Each unique talkgroup is assigned a stable 2D "pan" (Left/Right and Front/Rear) based on a hash of its ID. This creates an immersive, "in-the-center-of-the-room" listening experience where you can spatially distinguish different conversations.  
