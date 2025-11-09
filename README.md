@@ -4,7 +4,9 @@
 
 This project consists of a Python script (simplestream-quad-audio-mixer.py) that acts as a real-time, multi-call audio mixer for [trunk-recorder](https://github.com/robotastic/trunk-recorder).  
 It listens on a UDP port for trunk-recorder's simpleStream JSON events. As multiple, concurrent calls (call\_start, audio, call\_end) are received, it mixes them into a single, continuous 4-channel (quadraphonic) raw audio stream.  
+
 Each unique talkgroup is assigned a stable 2D "pan" (Left/Right and Front/Rear) based on a hash of its ID. This creates an immersive, "in-the-center-of-the-room" listening experience where you can spatially distinguish different conversations.  
+
 The script's 4-channel raw audio output is sent to stdout, designed to be piped directly into ffmpeg for encoding and streaming.
 
 ## **Requirements**
@@ -50,14 +52,14 @@ The Python script's 4-channel audio is piped to ffmpeg, which encodes it as a 5.
 
 Run this command on your server. Replace YOUR\_KODI\_PI\_IP with the IP of your Kodi device.  
 
-    python3 simplestream-quad-audio-mixer.py | ffmpeg \\  
-        \-hide\_banner \\
-        \-loglevel warning \\
-        \-f s16le \-ar 8000 \-ac 4 \-channel\_layout quad \-i pipe:0 \\  
-        \-af "pan=5.1|c0=c0|c1=c1|c4=c2|c5=c3" \\  
-        \-c:a ac3 \-b:a 448k \\  
-        \-f mpegts \\  
-        udp://YOUR\_KODI\_PI\_IP:1234
+    python3 simplestream-quad-audio-mixer.py | ffmpeg \
+        -hide_banner \
+        -loglevel warning \
+        -f s16le -ar 8000 -ac 4 -channel_layout quad -i pipe:0 \
+        -af "pan=5.1|c0=c0|c1=c1|c4=c2|c5=c3" \
+        -c:a ac3 -b:a 448k \
+        -f mpegts \
+        udp://YOUR\_KODI_PI_IP:1234
 
 ### **Step 2: Create .strm file on Kodi**
 
@@ -72,12 +74,12 @@ Playing this file in Kodi will start the stream. Your amp should indicate a Dolb
 If you don't have a 5.1 system and just want to listen to the mixed audio in stereo on your local machine (via PulseAudio or PipeWire), you can use this command.  
 This command pipes the 4-channel quadraphonic audio from the script into ffmpeg, which then mixes it down to stereo (FL+RL \-\> L, FR+RR \-\> R) and plays it on your default speakers.  
 
-    python3 simplestream-quad-audio-mixer.py | ffmpeg \\  
-        \-hide\_banner \\
-        \-loglevel warning \\
-        \-f s16le \-ar 8000 \-ac 4 \-channel\_layout quad \-i pipe:0 \\  
-        \-af "pan=stereo|c0=c0+c2|c1=c1+c3" \\  
-        \-f pulse "Trunked Radio Mix"
+    python3 simplestream-quad-audio-mixer.py | ffmpeg \
+        -hide\_banner \
+        -loglevel warning \
+        -f s16le -ar 8000 -ac 4 -channel_layout quad -i pipe:0 \
+        -af "pan=stereo|c0=c0+c2|c1=c1+c3" \
+        -f pulse "Trunked Radio Mix"
 
 You should see "Trunked Radio Mix" appear as a playback stream in your desktop's volume mixer (e.g., pavucontrol).
 
