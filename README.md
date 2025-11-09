@@ -50,7 +50,7 @@ The Python script's 4-channel audio is piped to ffmpeg, which encodes it as a 5.
 
 ### **Step 1: Run the Streamer**
 
-Run this command on your server. Replace YOUR\_KODI\_PI\_IP with the IP of your Kodi device.  
+Run this command on your trunked-radio server, or another server. Replace YOUR\_KODI\_PI\_IP with the IP of your Kodi device.  
 
     python3 simplestream-quad-audio-mixer.py | ffmpeg \
         -hide_banner \
@@ -63,7 +63,7 @@ Run this command on your server. Replace YOUR\_KODI\_PI\_IP with the IP of your 
 
 ### **Step 2: Create .strm file on Kodi**
 
-Create a file named radio.strm on your Kodi device with the following content:  
+Create a file (such as /storage/videos/quad_tr_player.strm) on your Kodi device with the following content:  
 
     udp://@:1234
 
