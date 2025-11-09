@@ -73,6 +73,7 @@ Playing this file in Kodi will start the stream. Your amp should indicate a Dolb
 ## **Alternative Usage: Local Stereo Playback**
 
 If you don't have a 5.1 system and just want to listen to the mixed audio in stereo on your local machine (via PulseAudio or PipeWire), you can use this command.  
+
 This command pipes the 4-channel quadraphonic audio from the script into ffmpeg, which then mixes it down to stereo (FL+RL \-\> L, FR+RR \-\> R) and plays it on your default speakers.  
 
     python3 simplestream-quad-audio-mixer.py | ffmpeg \
