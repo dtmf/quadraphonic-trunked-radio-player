@@ -16,15 +16,15 @@ The script's 4-channel raw audio output is sent to stdout, designed to be piped 
 
 ## **trunk-recorder Configuration**
 
-To use this script, you must enable audioStreaming, and enable the simpleStream plugin in your trunk-recorder config.json. This enables JSON-based streaming of all channels and all systems to the script's UDP port.  
+To use this script, you must enable audioStreaming, and enable the simpleStream plugin in your trunk-recorder config.json. This example enables JSON-based streaming of all channels and all systems to the script's UDP port:
 
 
     "audioStreaming": true,
 
-    "plugins": \[{
+    "plugins": [{
         "name":"simpletream",
         "library":"libsimplestream.so",
-        "streams":\[{
+        "streams":[{
             "TGID":0,
             "useTCP":false,
             "address":"127.0.0.1",
@@ -32,8 +32,8 @@ To use this script, you must enable audioStreaming, and enable the simpleStream 
             "sendCallStart":true,
             "sendCallEnd":true,
             "sendJSON":true
-        }\]
-    }\],
+        }]
+    }],
 
 
 **Note:** Adjust the address and port to match your setup. The script must be listening on the same port.
@@ -49,19 +49,21 @@ The Python script's 4-channel audio is piped to ffmpeg, which encodes it as a 5.
 ### **Step 1: Run the Streamer**
 
 Run this command on your server. Replace YOUR\_KODI\_PI\_IP with the IP of your Kodi device.  
-python3 simplestream-quad-audio-mixer.py | ffmpeg \\  
-    \-hide\_banner \
-    \-loglevel warning \
-    \-f s16le \-ar 8000 \-ac 4 \-channel\_layout quad \-i pipe:0 \\  
-    \-af "pan=5.1|c0=c0|c1=c1|c4=c2|c5=c3" \\  
-    \-c:a ac3 \-b:a 448k \\  
-    \-f mpegts \\  
-    udp://YOUR\_KODI\_PI\_IP:1234
+
+    python3 simplestream-quad-audio-mixer.py | ffmpeg \\  
+        \-hide\_banner \\
+        \-loglevel warning \\
+        \-f s16le \-ar 8000 \-ac 4 \-channel\_layout quad \-i pipe:0 \\  
+        \-af "pan=5.1|c0=c0|c1=c1|c4=c2|c5=c3" \\  
+        \-c:a ac3 \-b:a 448k \\  
+        \-f mpegts \\  
+        udp://YOUR\_KODI\_PI\_IP:1234
 
 ### **Step 2: Create .strm file on Kodi**
 
 Create a file named radio.strm on your Kodi device with the following content:  
-udp://@:1234
+
+    udp://@:1234
 
 Playing this file in Kodi will start the stream. Your amp should indicate a Dolby Digital signal.
 
@@ -69,21 +71,23 @@ Playing this file in Kodi will start the stream. Your amp should indicate a Dolb
 
 If you don't have a 5.1 system and just want to listen to the mixed audio in stereo on your local machine (via PulseAudio or PipeWire), you can use this command.  
 This command pipes the 4-channel quadraphonic audio from the script into ffmpeg, which then mixes it down to stereo (FL+RL \-\> L, FR+RR \-\> R) and plays it on your default speakers.  
-python3 simplestream-quad-audio-mixer.py | ffmpeg \\  
-    \-hide\_banner \
-    \-loglevel warning \
-    \-f s16le \-ar 8000 \-ac 4 \-channel\_layout quad \-i pipe:0 \\  
-    \-af "pan=stereo|c0=c0+c2|c1=c1+c3" \\  
-    \-f pulse "Trunked Radio Mix"
+
+    python3 simplestream-quad-audio-mixer.py | ffmpeg \\  
+        \-hide\_banner \\
+        \-loglevel warning \\
+        \-f s16le \-ar 8000 \-ac 4 \-channel\_layout quad \-i pipe:0 \\  
+        \-af "pan=stereo|c0=c0+c2|c1=c1+c3" \\  
+        \-f pulse "Trunked Radio Mix"
 
 You should see "Trunked Radio Mix" appear as a playback stream in your desktop's volume mixer (e.g., pavucontrol).
-
-## **AI-Assisted Development**
-
-This project was developed using a "vibe coding" approach, in close collaboration with Google's Gemini. I provided the high-level architecture, core logic, and iterative debugging, while Gemini assisted in generating boilerplate code, refining ffmpeg commands, and exploring different streaming protocols. As the human author, I have reviewed, tested, and take full responsibility for the final code.
 
 ## **Example script output:**
 coming soon
 
 ## **Example audio output:**
 coming soon
+
+## **AI-Assisted Development**
+
+This project was developed using a "vibe coding" approach, in close collaboration with Google's Gemini. I provided the high-level architecture, core logic, and iterative debugging, while Gemini assisted in generating boilerplate code, refining ffmpeg commands, and exploring different streaming protocols. As the human author, I have reviewed, tested, and take full responsibility for the final code.
+
