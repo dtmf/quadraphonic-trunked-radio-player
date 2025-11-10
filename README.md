@@ -10,6 +10,8 @@ Each unique talkgroup is assigned a stable 2D "pan" (Left/Right and Front/Rear) 
 
 The script's 4-channel raw audio output is sent to stdout, designed to be piped directly into ffmpeg for encoding and streaming.
 
+The script also generates a text file (active-talkgroups.txt) that can be used by ffmpeg to overlay a live list of currently active talkgroups onto a video stream.
+
 ## **Requirements**
 
 * Python 3  
@@ -19,8 +21,7 @@ The script's 4-channel raw audio output is sent to stdout, designed to be piped 
 
 ## **trunk-recorder Configuration**
 
-To use this script, you must enable audioStreaming, and enable the simpleStream plugin in your trunk-recorder config.json. This example enables JSON-based streaming of all channels and all systems to the script's UDP port:
-
+To use this script, you must enable audioStreaming, and enable the simpleStream plugin in your trunk-recorder config.json. This example enables JSON-based streaming of all channels of all systems to the script's UDP port:
 
     "audioStreaming": true,
 
@@ -38,46 +39,54 @@ To use this script, you must enable audioStreaming, and enable the simpleStream 
         }]
     }],
 
-
 **Note:** Adjust the address and port to match your setup. The script must be listening on the same port.
 
-## **Usage: Quadraphonic (5.1) Streamer**
+## **Usage:
 
-The Python script's 4-channel audio is piped to ffmpeg, which encodes it as a 5.1 Dolby Digital (AC-3) stream and broadcasts it over UDP to your media player (such as Kodi).
+### **Example 1: Live 5.1 Surround Sound (with Video Overlay) streamed to kodi**
 
-* **Python Script:** simplestream-quad-audio-mixer.py  
-* **ffmpeg:** Encodes to AC-3, maps 4 channels to 5.1 layout, streams via UDP.  
-* **Kodi:** Listens on UDP port 1234 via a .strm file.
+This example takes the 4-channel audio, maps it into a 5.1 Dolby Digital (AC-3) stream, and combines it with a 5fps video track showing the live contents of active-talkgroups.txt. It then broadcasts this combined audio/video stream over your local network using UDP.  
 
-### **Step 1: Run the Streamer**
-
-Run this command on your trunked-radio server, or another server. Replace YOUR\_KODI\_PI\_IP with the IP of your Kodi device.  
+    (Run this command on your trunked-radio server, or another server.)
 
     python3 simplestream-quad-audio-mixer.py | ffmpeg \
         -hide_banner \
         -loglevel warning \
-        -f s16le -ar 8000 -ac 4 -channel_layout quad -i pipe:0 \
+        -f s16le -ar 8000 -ac 4 -channel_layout quad \
+        -thread_queue_size 1024 -i pipe:0 \
+        -f lavfi -i "color=c=black:s=1280x720:r=5" \
+        -vf "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:fontsize=24:fontcolor=white:x=10:y=10:textfile=active-talkgroups.txt:reload=1" \
         -af "pan=5.1|c0=c0|c1=c1|c4=c2|c5=c3" \
         -c:a ac3 -b:a 448k \
+        -c:v libx264 -preset ultrafast -tune zerolatency \
         -f mpegts \
-        udp://YOUR\_KODI_PI_IP:1234
+        "udp://YOUR_KODI_IP:1234?pkt_size=1316"
 
-### **Step 2: Create .strm file on Kodi**
-
-Create a file (such as /storage/videos/quad_tr_player.strm) on your Kodi device with the following content:  
+* **You may need to change the fontfile= path to a valid font on your system
+* **YOUR\_KODI\_IP**: Change this to the IP address of your Kodi device
+* **On Kodi**: Create a text file named Quad\_Radio.strm with the following line and play it:
 
     udp://@:1234
 
-Playing this file in Kodi will start the stream. Your amp should indicate a Dolby Digital signal.
-
-## **Alternative Usage: Local Stereo Playback**
-
-If you don't have a 5.1 system and just want to listen to the mixed audio in stereo on your local machine (via PulseAudio or PipeWire), you can use this command.  
-
-This command pipes the 4-channel quadraphonic audio from the script into ffmpeg, which then mixes it down to stereo (FL+RL \-\> L, FR+RR \-\> R) and plays it on your default speakers.  
+### **Example 2: Live 5.1 Surround Sound (with Video Overlay) saved to a file**
 
     python3 simplestream-quad-audio-mixer.py | ffmpeg \
-        -hide\_banner \
+        -hide_banner \
+        -loglevel warning \
+        -f s16le -ar 8000 -ac 4 -channel_layout quad \
+        -thread_queue_size 1024 -i pipe:0 \
+        -f lavfi -i "color=c=black:s=1280x720:r=5" \
+        -vf "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:fontsize=24:fontcolor=white:x=10:y=10:textfile=active-talkgroups.txt:reload=1" \
+        -af "pan=5.1|c0=c0|c1=c1|c4=c2|c5=c3" \
+        -c:a ac3 -b:a 448k \
+        -c:v libx264 -preset ultrafast -tune zerolatency \
+        -t 60 \
+        quad-tr.mkv
+
+### **Example 3: Local Stereo Playback (Audio-Only)**
+
+    python3 simplestream-quad-audio-mixer.py | ffmpeg \
+        -hide_banner \
         -loglevel warning \
         -f s16le -ar 8000 -ac 4 -channel_layout quad -i pipe:0 \
         -af "pan=stereo|c0=c0+c2|c1=c1+c3" \

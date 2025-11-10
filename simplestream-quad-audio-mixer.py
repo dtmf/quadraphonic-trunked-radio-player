@@ -1,342 +1,466 @@
 #!/usr/bin/env python3
+
 """
-Receives trunk-recorder audio streams via UDP (with JSON headers),
-mixes them in real-time with quadraphonic panning based on talkgroup,
-and outputs a continuous raw s16le 4-CHANNEL stream to stdout
-for piping to ffmpeg.
+simplestream-quad-audio-mixer.py
 
-Receives audio from trunk-recorder's "simpleStream" plugin.
+Receives multiple raw audio streams from trunk-recorder's simpleStream
+plugin (using sendJSON) and mixes them into a single, continuous
+4-channel (quadraphonic) raw audio stream written to stdout.
 
+Each talkgroup is panned to a unique 2D (L/R, F/R) position.
+
+The script also maintains a "active-talkgroups.txt" file for ffmpeg.
+
+Designed to be piped directly to ffmpeg, e.g.:
+python3 simplestream-quad-audio-mixer.py | ffmpeg ...
 """
 
 import socket
-import sys
-import time
-import threading
 import struct
 import numpy as np
-import hashlib
+import threading
+import time
+import sys
 import json
+import hashlib
+import atexit
 import datetime
+import os
 
 # --- Configuration ---
-UDP_IP = "0.0.0.0"
-UDP_PORT = 7355
+UDP_IP = "0.0.0.0"          # IP to listen on (0.0.0.0 for all)
+UDP_PORT = 7355             # Port to listen on (must match trunk-recorder)
+CHUNK_MS = 40               # Audio chunk size in milliseconds (e.g., 40ms)
+SAMPLE_RATE = 8000          # 8Khz, per trunk-recorder
+DTYPE = np.int16            # s16le, per trunk-recorder
+CHANNELS = 4                # 4-Channel (Quad) output
+STREAM_TIMEOUT_S = 5.0      # How many seconds of silence to wait before culling a stream
+STATUS_FILE = "active-talkgroups.txt" # File to write active call status for ffmpeg
 
-# Audio format from trunk-recorder
-SAMPLE_RATE = 8000
-AUDIO_FORMAT = np.int16
-AUDIO_CHANNELS_IN = 1
+# --- Calculated Constants ---
+CHUNK_SAMPLES_MONO = int(SAMPLE_RATE * CHUNK_MS / 1000)
+CHUNK_BYTES_MONO = CHUNK_SAMPLES_MONO * np.dtype(DTYPE).itemsize
+CHUNK_SAMPLES_QUAD = CHUNK_SAMPLES_MONO * CHANNELS
+CHUNK_BYTES_QUAD = CHUNK_SAMPLES_QUAD * np.dtype(DTYPE).itemsize
 
-# Audio format for output (piping to ffmpeg)
-AUDIO_CHANNELS_OUT = 4  # CHANGED: 2 -> 4 (Quadraphonic: FL, FR, RL, RR)
-AUDIO_WIDTH_BYTES = np.dtype(AUDIO_FORMAT).itemsize  # 2 bytes for s16le
-
-# Processing chunk size
-CHUNK_MS = 40  # 40ms audio chunks (good for low latency)
-
-# Calculated constants
-CHUNK_SAMPLES_PER_CHANNEL = int(SAMPLE_RATE * (CHUNK_MS / 1000.0))
-CHUNK_BYTES_MONO = CHUNK_SAMPLES_PER_CHANNEL * AUDIO_WIDTH_BYTES * AUDIO_CHANNELS_IN
-# RENAMED: CHUNK_BYTES_STEREO -> CHUNK_BYTES_OUT
-CHUNK_BYTES_OUT = CHUNK_SAMPLES_PER_CHANNEL * AUDIO_WIDTH_BYTES * AUDIO_CHANNELS_OUT
-# RENAMED: SILENT_CHUNK_STEREO -> SILENT_CHUNK_OUT
-SILENT_CHUNK_OUT = np.zeros(CHUNK_SAMPLES_PER_CHANNEL * AUDIO_CHANNELS_OUT, dtype=AUDIO_FORMAT)
-
-# Stream management
-STREAM_TIMEOUT_S = 5.0  # Cull stream after 5 seconds of no audio
-
-# Protocol headers
-JSON_LEN_HEADER = struct.Struct('<I')  # 4-byte unsigned int (little-endian)
+# 4-byte little-endian unsigned int for JSON length
+JSON_LEN_HEADER = struct.Struct('<I')
 
 # --- Shared State ---
-# This dictionary is the central, thread-safe state.
+# This dictionary holds the audio buffers and metadata for all active calls.
+# It is protected by the stream_lock.
 #
 # active_streams = {
-#     <talkgroup_id_int>: {
+#     1001: {
 #         "buffer": bytearray(),
 #         "last_seen": time.time(),
-#         "pan_lr": 0.75,               # 0.0 (L) to 1.0 (R)
-#         "pan_fr": 0.25,               # 0.0 (F) to 1.0 (R)
-#         ...
+#         "pan_l": 0.3,
+#         "pan_r": 0.7,
+#         "pan_f": 0.6,
+#         "pan_r_rear": 0.4,
+#         "tag": "FWPD 1",
+#         "short_name": "FWPD Disp",
+#         "src": "720001",
+#         "audio_event_count": 0
 #     }
 # }
 active_streams = {}
 stream_lock = threading.Lock()
 running = True
 
+# --- Utility Functions ---
+
 def log(message):
-    """Prints a message to stderr with a millisecond timestamp."""
-    now = datetime.datetime.now()
-    print(f"[{now.strftime('%Y-%m-%d %H:%M:%S')}.{now.microsecond//1000:03d}] {message}", file=sys.stderr)
+    """Logs a message to stderr with a timestamp."""
+    ts = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    print(f"[{ts}] {message}", file=sys.stderr)
 
 def get_pan_for_talkgroup(talkgroup_id):
     """
-    Creates stable, unique 2D pan positions for a talkgroup.
-    Returns (pan_lr, pan_fr)
-    - pan_lr: 0.0 (100% Left) to 1.0 (100% Right)
-    - pan_fr: 0.0 (100% Front) to 1.0 (100% Rear)
+    Generates a stable, unique 2D pan position for a talkgroup.
+    Returns (pan_l, pan_r, pan_f, pan_r_rear)
     """
-    hash_obj = hashlib.sha1(str(talkgroup_id).encode('utf-8'))
-    hash_bytes = hash_obj.digest()
+    # Use a hash to get a stable "random" value for the talkgroup
+    # We use a string to handle negative IDs
+    h_lr = hashlib.sha256(f"lr-{talkgroup_id}".encode()).digest()
+    h_fr = hashlib.sha256(f"fr-{talkgroup_id}".encode()).digest()
     
-    # Use first 2 bytes for Left/Right pan
-    hash_val_lr = int.from_bytes(hash_bytes[0:2], 'little')
-    pan_lr = hash_val_lr / 65535.0
+    # Convert first 2 bytes to a 0.0-1.0 value
+    pan_lr_percent = (h_lr[0] * 256 + h_lr[1]) / 65535.0
+    pan_fr_percent = (h_fr[0] * 256 + h_fr[1]) / 65535.0
+
+    # Ensure pan is not 100% L/R or F/R (sounds bad)
+    # Clamp to a range of 10% to 90%
+    pan_lr_percent = np.clip(pan_lr_percent, 0.1, 0.9)
+    pan_fr_percent = np.clip(pan_fr_percent, 0.1, 0.9)
+
+    # Use "constant power" panning to avoid volume dips
+    pan_l = np.cos(pan_lr_percent * np.pi / 2.0)
+    pan_r = np.sin(pan_lr_percent * np.pi / 2.0)
     
-    # Use next 2 bytes for Front/Rear pan
-    hash_val_fr = int.from_bytes(hash_bytes[2:4], 'little')
-    pan_fr = hash_val_fr / 65535.0
-    
-    return pan_lr, pan_fr
+    pan_f = np.cos(pan_fr_percent * np.pi / 2.0)
+    pan_r_rear = np.sin(pan_fr_percent * np.pi / 2.0) # 'pan_r' is already used
+
+    return (pan_l, pan_r, pan_f, pan_r_rear)
+
+def update_status_file(streams, lock):
+    """
+    Writes the list of active talkgroups to the STATUS_FILE.
+    This function is thread-safe.
+    """
+    lines_to_write = []
+    try:
+        with lock:
+            # Create a list of human-readable strings
+            if not streams:
+                lines_to_write.append("Monitoring... (0 active calls)")
+            else:
+                lines_to_write.append(f"Active Calls: {len(streams)}")
+                lines_to_write.append("-" * 20)
+                # Sort by talkgroup ID for a stable display
+                sorted_tgs = sorted(streams.keys())
+                for tg_id in sorted_tgs:
+                    stream = streams[tg_id]
+                    # Format as: TG ID (short_name) - TAG
+                    lines_to_write.append(f"TG {tg_id} ({stream['short_name']}) - {stream['tag']}")
+        
+        # Write to the file (outside the lock)
+        # Use a temporary file and atomic rename to prevent ffmpeg
+        # from reading a half-written file.
+        temp_file = f"{STATUS_FILE}.tmp"
+        with open(temp_file, "w") as f:
+            f.write("\n".join(lines_to_write))
+        
+        # Atomic rename
+        os.rename(temp_file, STATUS_FILE)
+
+    except Exception as e:
+        # Don't log if the lock is held, just fail silently
+        if not lock.locked():
+            log(f"ERROR: Could not write to status file {STATUS_FILE}: {e}")
+
+# --- Threads ---
 
 def udp_receive_thread():
     """
-    Listens for UDP packets, parses JSON, and buffers audio.
-    This thread is I/O bound.
+    Listens for UDP packets, parses them, and puts audio
+    data into the correct buffer in active_streams.
     """
     global running
     log(f"Starting UDP receiver on {UDP_IP}:{UDP_PORT}...")
+    
     try:
         udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536 * 16)
         udp_socket.bind((UDP_IP, UDP_PORT))
-        udp_socket.settimeout(1.0)  # Check for 'running' flag every 1s
-    except OSError as e:
-        log(f"ERROR: Could not bind to port {UDP_PORT}: {e}")
-        log(f"ERROR: Is another instance running?")
-        running = False
-        return
+        udp_socket.settimeout(1.0) # 1-second timeout
 
-    while running:
-        try:
-            data, addr = udp_socket.recvfrom(8192)
-
-            if not data or len(data) <= JSON_LEN_HEADER.size:
-                continue
-            
-            short_name = "N/A"
-            
+        while running:
             try:
-                json_size = JSON_LEN_HEADER.unpack(data[:JSON_LEN_HEADER.size])[0]
-                json_start = JSON_LEN_HEADER.size
-                json_end = json_start + json_size
-                json_header = json.loads(data[json_start:json_end].decode('utf-8'))
-            except Exception as e:
-                log(f"WARN: Could not parse JSON header. Error: {e}")
-                continue
-                
-            event = json_header.get("event")
-            src_id = json_header.get("src", -1) 
-            now = time.time()
-
-            if event == "call_start":
-                talkgroup_id = int(json_header.get("talkgroup", 0))
-                if talkgroup_id == 0:
-                    continue
-                
-                tag = json_header.get("talkgroup_tag", "Unknown")
-                short_name = json_header.get("short_name", "N/A")
-
-                with stream_lock:
-                    if talkgroup_id in active_streams:
-                        active_streams[talkgroup_id]["tag"] = tag
-                        active_streams[talkgroup_id]["short_name"] = short_name
-                        active_streams[talkgroup_id]["last_seen"] = now
-                        active_streams[talkgroup_id]["audio_event_count"] = 0 
-                        active_streams[talkgroup_id]["src_id"] = src_id 
-                        log(f"Received call_start for active {short_name} TG {talkgroup_id} (src: {src_id})")
-                    else:
-                        pan_lr, pan_fr = get_pan_for_talkgroup(talkgroup_id)
-                        active_streams[talkgroup_id] = {
-                            "buffer": bytearray(),
-                            "last_seen": now,
-                            "pan_lr": pan_lr,
-                            "pan_fr": pan_fr,
-                            "tg_id": talkgroup_id,
-                            "tag": tag,
-                            "short_name": short_name,
-                            "audio_event_count": 0,
-                            "src_id": src_id
-                        }
-                        log(f"call_start: {short_name} TG {talkgroup_id} ({tag}) (src: {src_id}) at pan LR:{pan_lr:.2f}/FR:{pan_fr:.2f} (Active calls: {len(active_streams)})")
-
-            elif event == "audio":
-                talkgroup_id = int(json_header.get("talkgroup", 0))
-                if talkgroup_id == 0:
-                    continue
-
-                mono_bytes = data[json_end:]
-                if not mono_bytes or len(mono_bytes) < 100:
-                    continue
-
-                with stream_lock:
-                    if talkgroup_id not in active_streams:
-                        pan_lr, pan_fr = get_pan_for_talkgroup(talkgroup_id)
-                        short_name = json_header.get("short_name", "N/A")
-                        active_streams[talkgroup_id] = {
-                            "buffer": bytearray(mono_bytes),
-                            "last_seen": now,
-                            "pan_lr": pan_lr,
-                            "pan_fr": pan_fr,
-                            "tg_id": talkgroup_id,
-                            "tag": "Unknown",
-                            "short_name": short_name, 
-                            "audio_event_count": 1, 
-                            "src_id": src_id
-                        }
-                        log(f"WARN: Missed call_start! Creating stream for {short_name} TG {talkgroup_id} (Active calls: {len(active_streams)})")
-                    else:
-                        active_streams[talkgroup_id]["buffer"].extend(mono_bytes)
-                        active_streams[talkgroup_id]["last_seen"] = now
-                        active_streams[talkgroup_id]["audio_event_count"] += 1
-
-            elif event == "call_end":
-                talkgroup_id = int(json_header.get("talkgroup", 0))
-                if talkgroup_id == 0:
-                    continue
-                
-                with stream_lock:
-                    if talkgroup_id in active_streams:
-                        event_count = active_streams[talkgroup_id]["audio_event_count"]
-                        short_name = active_streams[talkgroup_id]["short_name"]
-                        log(f"call_end: {short_name} TG {talkgroup_id} after {event_count} audio events. (Active calls: {len(active_streams) - 1})")
-                        del active_streams[talkgroup_id]
-                    else:
-                        pass 
+                data, addr = udp_socket.recvfrom(8192) # 8KB buffer
+            except socket.timeout:
+                continue # Just loop again
             
-            else:
-                pass
+            if not running:
+                break
+                
+            if not data:
+                continue
 
-        except socket.timeout:
-            continue
-        except UnboundLocalError as e:
-            log(f"WARN: UnboundLocalError (harmless on startup): {e}")
-            continue
-        except Exception as e:
-            if running:
-                log(f"ERROR: An unexpected error occurred: {e}")
+            try:
+                # --- JSON Header Parsing ---
+                if len(data) < JSON_LEN_HEADER.size:
+                    log(f"Packet too small for JSON header: {len(data)} bytes")
+                    continue
+                
+                json_size = JSON_LEN_HEADER.unpack(data[:4])[0]
+                json_end = 4 + json_size
+                
+                if json_end > len(data):
+                    log(f"JSON size ({json_size}) exceeds packet length ({len(data)})")
+                    continue
+                    
+                header_data = json.loads(data[4:json_end].decode('utf-8'))
+                
+                event = header_data.get("event", "audio")
+                talkgroup_id = int(header_data.get("talkgroup", 0))
+                tag = header_data.get("talkgroup_tag", "N/A")
+                short_name = header_data.get("short_name", "N/A")
+                src = header_data.get("src", "N/A")
+                mono_bytes = data[json_end:]
 
-    log("UDP receiver thread stopped.")
-    udp_socket.close()
+                # --- Event Handling ---
+                update_file = False
+                
+                if event == "call_start":
+                    pan_l, pan_r, pan_f, pan_r_rear = get_pan_for_talkgroup(talkgroup_id)
+                    with stream_lock:
+                        if talkgroup_id not in active_streams:
+                            active_streams[talkgroup_id] = {
+                                "buffer": bytearray(),
+                                "last_seen": time.time(),
+                                "pan_l": pan_l,
+                                "pan_r": pan_r,
+                                "pan_f": pan_f,
+                                "pan_r_rear": pan_r_rear,
+                                "tag": tag,
+                                "short_name": short_name,
+                                "src": src,
+                                "audio_event_count": 0
+                            }
+                            log(f"call_start: {short_name} TG {talkgroup_id} ({tag}) src: {src} at pan LR {pan_l:.2f}/FR {pan_f:.2f} (Active calls: {len(active_streams)})")
+                            update_file = True
+                        else:
+                            # Call already active, just update metadata
+                            active_streams[talkgroup_id]["tag"] = tag
+                            active_streams[talkgroup_id]["short_name"] = short_name
+                            active_streams[talkgroup_id]["src"] = src
+                            active_streams[talkgroup_id]["last_seen"] = time.time()
+                            log(f"Received call_start for active {short_name} TG {talkgroup_id} (src: {src})")
+                            update_file = True # Update file on metadata change too
+
+                elif event == "audio":
+                    if not mono_bytes:
+                        continue # Skip empty audio packets
+
+                    # Filter out tiny keep-alive packets
+                    if len(mono_bytes) < 100:
+                        if talkgroup_id in active_streams:
+                            # Just update the timestamp to prevent timeout
+                            with stream_lock:
+                                if talkgroup_id in active_streams:
+                                     active_streams[talkgroup_id]["last_seen"] = time.time()
+                        continue
+                    
+                    with stream_lock:
+                        if talkgroup_id in active_streams:
+                            active_streams[talkgroup_id]["buffer"].extend(mono_bytes)
+                            active_streams[talkgroup_id]["last_seen"] = time.time()
+                            active_streams[talkgroup_id]["audio_event_count"] += 1
+                        else:
+                            # Missed call_start! Create a default stream
+                            pan_l, pan_r, pan_f, pan_r_rear = get_pan_for_talkgroup(talkgroup_id)
+                            active_streams[talkgroup_id] = {
+                                "buffer": bytearray(mono_bytes),
+                                "last_seen": time.time(),
+                                "pan_l": pan_l,
+                                "pan_r": pan_r,
+                                "pan_f": pan_f,
+                                "pan_r_rear": pan_r_rear,
+                                "tag": tag,
+                                "short_name": short_name,
+                                "src": src,
+                                "audio_event_count": 1
+                            }
+                            log(f"Missed call_start! Creating stream for {short_name} TG {talkgroup_id} (Active calls: {len(active_streams)})")
+                            update_file = True # <-- Set flag
+                    
+                    # --- Update Status File (Outside Lock) ---
+                    # <-- FIX: Moved this block outside the 'with stream_lock'
+                    if update_file:
+                        update_status_file(active_streams, stream_lock)
+                        
+                elif event == "call_end":
+                    with stream_lock:
+                        if talkgroup_id in active_streams:
+                            # Get metadata before deleting
+                            stream_info = active_streams[talkgroup_id]
+                            short_name = stream_info['short_name']
+                            count = stream_info['audio_event_count']
+                            
+                            del active_streams[talkgroup_id]
+                            log(f"call_end: {short_name} TG {talkgroup_id} after {count} audio events. (Active calls: {len(active_streams)})")
+                            update_file = True
+                        else:
+                            pass # Ignore end event for a stream we don't have
+                
+                # --- Update Status File (Outside Lock) ---
+                # <-- FIX: Moved this block outside the 'with stream_lock'
+                if update_file and event != "audio": # 'audio' event handles its own update
+                    update_status_file(active_streams, stream_lock)
+            
+            except json.JSONDecodeError as e:
+                log(f"JSON decode error: {e}. Packet size: {len(data)}")
+            except struct.error as e:
+                log(f"Struct unpack error: {e}. Packet size: {len(data)}")
+            except Exception as e:
+                log(f"Unhandled packet error: {e}")
+
+    except Exception as e:
+        log(f"[UDP ERROR] An unexpected error occurred: {e}")
+    finally:
+        running = False
+        log("UDP receiver thread stopped.")
 
 def stdout_play_thread():
     """
-    Runs a real-time loop, pulling, mixing, and writing audio to stdout.
-    This thread is CPU/time bound.
+    The "metronome" thread. Runs on a strict timer.
+    Pulls audio from all active buffers, mixes them, and
+    writes the final chunk to stdout.
     """
     global running
-    log(f"Starting audio mixer. Writing to stdout...")
-    log(f"Audio format: {SAMPLE_RATE} Hz, s16le, 4-Channel Quadraphonic")
-    log(f"Chunk size: {CHUNK_MS}ms ({CHUNK_BYTES_OUT} bytes)")
+    log("Starting audio mixer. Writing to stdout...")
+    log(f"Audio format: {SAMPLE_RATE} Hz, {np.dtype(DTYPE).name}, {CHANNELS}-Channel (Quad)")
+    log(f"Chunk size: {CHUNK_MS}ms ({CHUNK_BYTES_QUAD} bytes)")
     
+    # Create a reusable buffer for silence
+    silent_chunk_quad = np.zeros(CHUNK_SAMPLES_QUAD, dtype=DTYPE)
+    
+    # Create a reusable float buffer for mixing
+    mix_buffer_quad = np.zeros(CHUNK_SAMPLES_QUAD, dtype=np.float32)
+
     try:
-        stdout_buffer = sys.stdout.buffer
-    except Exception as e:
-        log(f"ERROR: Could not open stdout.buffer: {e}")
-        log(f"ERROR: Are you piping this script to another command?")
-        running = False
-        return
-
-    from time import sleep, perf_counter
-    interval = CHUNK_MS / 1000.0
-    
-    # We will mix audio into this float buffer
-    # It's persistent to avoid re-allocating memory in the loop
-    mix_buffer_float = np.zeros(CHUNK_SAMPLES_PER_CHANNEL * AUDIO_CHANNELS_OUT, dtype=np.float32)
-
-    next_frame_time = perf_counter()
-
-    while running:
-        try:
-            while perf_counter() < next_frame_time:
-                sleep(0.0001)
-            next_frame_time += interval
+        # Get stdout in binary mode
+        out_pipe = sys.stdout.buffer
+        
+        start_time = time.time()
+        next_chunk_time = start_time
+        
+        while running:
+            # Clear the mix buffer
+            mix_buffer_quad.fill(0)
             
             now = time.time()
-            streams_to_mix = []
-            streams_to_cull = []
-
-            mix_buffer_float.fill(0) # Reset the mix buffer
-            has_audio = False
-
-            with stream_lock:
-                for tg_id, stream in active_streams.items():
-                    if (now - stream["last_seen"]) > STREAM_TIMEOUT_S:
-                        streams_to_cull.append(tg_id)
-                        continue
-                    
-                    if len(stream["buffer"]) >= CHUNK_BYTES_MONO:
-                        streams_to_mix.append(stream)
-                
-                for stream in streams_to_mix:
-                    mono_bytes = stream["buffer"][:CHUNK_BYTES_MONO]
-                    del stream["buffer"][:CHUNK_BYTES_MONO]
-
-                    mono_float = np.frombuffer(mono_bytes, dtype=AUDIO_FORMAT).astype(np.float32)
-
-                    # --- 2D QUADRAPHONIC PANNING ---
-                    L = (1.0 - stream["pan_lr"])
-                    R = stream["pan_lr"]
-                    F = (1.0 - stream["pan_fr"])
-                    B = stream["pan_fr"] # B for Back/Rear
-
-                    # Apply 4-corner amplitude panning and add to the mix buffer
-                    # Channel 0: Front Left
-                    mix_buffer_float[0::4] += mono_float * F * L
-                    # Channel 1: Front Right
-                    mix_buffer_float[1::4] += mono_float * F * R
-                    # Channel 2: Rear Left
-                    mix_buffer_float[2::4] += mono_float * B * L
-                    # Channel 3: Rear Right
-                    mix_buffer_float[3::4] += mono_float * B * R
-                    
-                    has_audio = True
-
-                for tg_id in streams_to_cull:
-                    if tg_id in active_streams:
-                        event_count = active_streams[tg_id]["audio_event_count"]
-                        short_name = active_streams[tg_id]["short_name"]
-                        log(f"timeout: {short_name} TG {tg_id} after {event_count} audio events (Missed call_end?) (Active calls: {len(active_streams) - 1})")
-                        del active_streams[tg_id]
-
-            if has_audio:
-                np.clip(mix_buffer_float, -32768, 32767, out=mix_buffer_float)
-                final_chunk = mix_buffer_float.astype(AUDIO_FORMAT)
-                stdout_buffer.write(final_chunk.tobytes())
-            else:
-                stdout_buffer.write(SILENT_CHUNK_OUT.tobytes())
+            culled_streams = False
             
-            stdout_buffer.flush()
+            with stream_lock:
+                if not active_streams:
+                    # No active streams, just send silence
+                    out_pipe.write(silent_chunk_quad.tobytes())
+                    out_pipe.flush() # <-- FIX: Flush stdout for silence
+                else:
+                    # --- Mix Active Streams ---
+                    streams_to_cull = []
+                    for tg_id, stream in active_streams.items():
+                        
+                        # Check for stream timeout
+                        if (now - stream["last_seen"]) > STREAM_TIMEOUT_S:
+                            streams_to_cull.append(tg_id)
+                            continue
+                            
+                        # Check if we have enough data
+                        if len(stream["buffer"]) >= CHUNK_BYTES_MONO:
+                            # Pop one chunk of mono data
+                            mono_bytes = stream["buffer"][:CHUNK_BYTES_MONO]
+                            del stream["buffer"][:CHUNK_BYTES_MONO]
+                            
+                            # Convert to numpy array
+                            mono_chunk = np.frombuffer(mono_bytes, dtype=DTYPE)
+                            
+                            # --- 4-Channel Panning ---
+                            # This is the core 2D panning logic.
+                            # We create 4 channels from the 1 mono channel.
+                            
+                            # 1. Convert to float for mixing
+                            mono_float = mono_chunk.astype(np.float32)
+                            
+                            # 2. Apply F/R pan
+                            f_channel = mono_float * stream["pan_f"]
+                            r_channel = mono_float * stream["pan_r_rear"]
+                            
+                            # 3. Apply L/R pan to F/R channels
+                            # This creates 4 distinct channels: FL, FR, RL, RR
+                            # c0 = FL, c1 = FR, c2 = RL, c3 = RR
+                            
+                            # "De-interleave" the mix buffer for easier mixing
+                            # mix_buffer_quad[0::4] -> all Front-Left samples
+                            # mix_buffer_quad[1::4] -> all Front-Right samples
+                            # mix_buffer_quad[2::4] -> all Rear-Left samples
+                            # mix_buffer_quad[3::4] -> all Rear-Right samples
+                            
+                            mix_buffer_quad[0::4] += f_channel * stream["pan_l"] # FL
+                            mix_buffer_quad[1::4] += f_channel * stream["pan_r"] # FR
+                            mix_buffer_quad[2::4] += r_channel * stream["pan_l"] # RL
+                            mix_buffer_quad[3::4] += r_channel * stream["pan_r_rear"] # RR
+                    
+                    # --- Finalize Mix ---
+                    # Clip the mixed audio to prevent overflow
+                    np.clip(mix_buffer_quad, -32768, 32767, out=mix_buffer_quad)
+                    
+                    # Convert back to int16
+                    final_chunk_quad = mix_buffer_quad.astype(DTYPE)
+                    
+                    # Write to stdout
+                    out_pipe.write(final_chunk_quad.tobytes())
+                    out_pipe.flush() # <-- FIX: Flush stdout for mixed audio
 
-        except BrokenPipeError:
-            log("WARN: Broken pipe. (ffmpeg probably closed)")
-            running = False
-        except Exception as e:
-            if running:
-                log(f"ERROR: An unexpected error occurred: {e}")
-                running = False
+                    # --- Cull Timed-out Streams ---
+                    if streams_to_cull:
+                        culled_streams = True
+                        for tg_id in streams_to_cull:
+                            log(f"{active_streams[tg_id]['short_name']} TG {tg_id} (timeout - Missed call_end?) (Active calls: {len(active_streams) - 1})")
+                            del active_streams[tg_id]
+            
+            # If we culled, update the status file
+            if culled_streams:
+                update_status_file(active_streams, stream_lock)
+            
+            # --- Metronome Logic ---
+            # Calculate the time for the next chunk
+            next_chunk_time += (CHUNK_MS / 1000.0)
+            
+            # Sleep until the next chunk time
+            sleep_time = next_chunk_time - time.time()
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+            elif sleep_time < -0.1:
+                # We're more than 100ms behind!
+                # This is bad, but just reset the timer to now.
+                log(f"WARN: Audio mixer is lagging! ({sleep_time:.2f}s)")
+                next_chunk_time = time.time()
 
-    log("Audio mixer thread stopped.")
-
-# --- Main Execution ---
-if __name__ == "__main__":
-    if not sys.stdout.isatty():
-        t_udp = threading.Thread(target=udp_receive_thread, daemon=True)
-        t_play = threading.Thread(target=stdout_play_thread, daemon=True)
-        t_udp.start()
-        t_play.start()
+    except BrokenPipeError:
+        log("WARN: Broken pipe. (ffmpeg probably closed)")
+    except Exception as e:
+        log(f"[STDOUT ERROR] An unexpected error occurred: {e}")
+    finally:
+        running = False
+        log("Audio mixer thread stopped.")
+        # Clear the status file on exit
         try:
-            while running:
-                time.sleep(1.0)
-                if not t_udp.is_alive() or not t_play.is_alive():
-                    running = False
-        except KeyboardInterrupt:
-            log("\nCaught Ctrl+C, shutting down...")
-            running = False
-        t_udp.join(timeout=2.0)
-        t_play.join(timeout=2.0)
-        log("Shutdown complete.")
-    else:
-        print("This script is designed to be piped to ffmpeg.", file=sys.stderr)
-        print("It cannot write audio data to the terminal.", file=sys.stderr)
-        sys.exit(1)
+            with open(STATUS_FILE, "w") as f:
+                f.write("Offline")
+        except:
+            pass # Don't worry if it fails
+
+# --- Main ---
+def main():
+    global running
+    
+    # Create and start threads
+    t_udp = threading.Thread(target=udp_receive_thread, daemon=True)
+    t_play = threading.Thread(target=stdout_play_thread, daemon=True)
+    
+    t_udp.start()
+    t_play.start()
+    
+    def on_exit():
+        global running
+        running = False
+        log("Shutdown signal received...")
+        
+    atexit.register(on_exit)
+    
+    try:
+        while running:
+            # Keep main thread alive to catch signals
+            time.sleep(0.5)
+            # Check if threads are alive
+            if not t_udp.is_alive():
+                log("ERROR: UDP receiver thread died. Exiting.")
+                running = False
+            if not t_play.is_alive():
+                log("ERROR: Audio mixer thread died. Exiting.")
+                running = False
+                
+    except KeyboardInterrupt:
+        pass
+    
+    running = False
+    log("Shutting down...")
+    t_udp.join(timeout=1.0)
+    t_play.join(timeout=1.0)
+    log("Shutdown complete.")
+
+if __name__ == "__main__":
+    main()
