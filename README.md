@@ -12,6 +12,9 @@ The script's 4-channel raw audio output is sent to stdout, designed to be piped 
 
 The script also generates a text file (active-talkgroups.txt) that can be used by ffmpeg to overlay a live list of currently active talkgroups onto a video stream.
 
+## **Example output**
+coming soon
+
 ## **Requirements**
 
 * Python 3  
@@ -47,7 +50,7 @@ To use this script, you must enable audioStreaming, and enable the simpleStream 
 
 This example takes the 4-channel audio, maps it into a 5.1 Dolby Digital (AC-3) stream, and combines it with a 5fps video track showing the live contents of active-talkgroups.txt. It then broadcasts this combined audio/video stream over your local network using UDP.  
 
-(Run this command on your trunked-radio server, or another server.)
+Run this command on your trunked-radio server, or another server.
 
     python3 simplestream-quad-audio-mixer.py | ffmpeg \
         -hide_banner \
@@ -64,7 +67,7 @@ This example takes the 4-channel audio, maps it into a 5.1 Dolby Digital (AC-3) 
 
 You may need to change the fontfile= path to a valid font on your system
 
-YOUR\_KODI\_IP**: Change this to the IP address of your Kodi device
+YOUR\_KODI\_IP: Change this to the IP address of your Kodi device
 
 On Kodi: Create a text file named Quad\_Radio.strm with the following line and play it:
 
@@ -97,9 +100,6 @@ On Kodi: Create a text file named Quad\_Radio.strm with the following line and p
 You should see "Trunked Radio Mix" appear as a playback stream in your desktop's volume mixer (e.g., pavucontrol).
 
 ## **Example script output:**
-coming soon
-
-## **Example audio output:**
 coming soon
 
 ## **AI-Assisted Development**
