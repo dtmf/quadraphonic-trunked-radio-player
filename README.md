@@ -4,7 +4,7 @@
 
 This project consists of a Python script (simplestream-quad-audio-mixer.py) that acts as a real-time, multi-call audio mixer for [trunk-recorder](https://github.com/robotastic/trunk-recorder).  
 
-It listens on a UDP port for trunk-recorder's simpleStream JSON events. As multiple, concurrent calls (call\_start, audio, call\_end) are received, it mixes them into a single, continuous 4-channel (quadraphonic) raw audio stream.  
+It listens on a UDP port for trunk-recorder's simpleStream JSON events. As multiple, concurrent calls are received, it mixes them into a single, continuous 4-channel (quadraphonic) raw audio stream.  
 
 Each unique talkgroup is assigned a stable 2D "pan" (Left/Right and Front/Rear) based on a hash of its ID. This creates an immersive, "in-the-center-of-the-room" listening experience where you can spatially distinguish different conversations.  
 
@@ -41,13 +41,13 @@ To use this script, you must enable audioStreaming, and enable the simpleStream 
 
 **Note:** Adjust the address and port to match your setup. The script must be listening on the same port.
 
-## **Usage:
+## **Usage**
 
 ### **Example 1: Live 5.1 Surround Sound (with Video Overlay) streamed to kodi**
 
 This example takes the 4-channel audio, maps it into a 5.1 Dolby Digital (AC-3) stream, and combines it with a 5fps video track showing the live contents of active-talkgroups.txt. It then broadcasts this combined audio/video stream over your local network using UDP.  
 
-    (Run this command on your trunked-radio server, or another server.)
+(Run this command on your trunked-radio server, or another server.)
 
     python3 simplestream-quad-audio-mixer.py | ffmpeg \
         -hide_banner \
@@ -62,9 +62,11 @@ This example takes the 4-channel audio, maps it into a 5.1 Dolby Digital (AC-3) 
         -f mpegts \
         "udp://YOUR_KODI_IP:1234?pkt_size=1316"
 
-* **You may need to change the fontfile= path to a valid font on your system
-* **YOUR\_KODI\_IP**: Change this to the IP address of your Kodi device
-* **On Kodi**: Create a text file named Quad\_Radio.strm with the following line and play it:
+You may need to change the fontfile= path to a valid font on your system
+
+YOUR\_KODI\_IP**: Change this to the IP address of your Kodi device
+
+On Kodi: Create a text file named Quad\_Radio.strm with the following line and play it:
 
     udp://@:1234
 
