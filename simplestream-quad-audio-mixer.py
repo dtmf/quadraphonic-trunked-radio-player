@@ -109,20 +109,22 @@ def update_status_file(streams, lock):
     This function is thread-safe.
     """
     lines_to_write = []
+    now = datetime.datetime.now()
+    ts = f"{now.strftime('%Y/%m/%d %H:%M:%S')}"
+
     try:
         with lock:
             # Create a list of human-readable strings
             if not streams:
-                lines_to_write.append("Monitoring... (0 active calls)")
+                lines_to_write.append(f"{ts} - No active calls")
             else:
-                lines_to_write.append(f"Active Calls: {len(streams)}")
-                lines_to_write.append("-" * 20)
+                lines_to_write.append(f"{ts} - Active Calls: {len(streams)}")
+                lines_to_write.append("-" * 50)
                 # Sort by talkgroup ID for a stable display
                 sorted_tgs = sorted(streams.keys())
                 for tg_id in sorted_tgs:
                     stream = streams[tg_id]
-                    # Format as: TG ID (short_name) - TAG
-                    lines_to_write.append(f"TG {tg_id} ({stream['short_name']}) - {stream['tag']}")
+                    lines_to_write.append(f"TG {tg_id} [{stream['short_name']}] - {stream['tag']}")
         
         # Write to the file (outside the lock)
         # Use a temporary file and atomic rename to prevent ffmpeg
@@ -208,7 +210,7 @@ def udp_receive_thread():
                                 "src": src,
                                 "audio_event_count": 0
                             }
-                            log(f"call_start: {short_name} TG {talkgroup_id} ({tag}) src: {src} at pan LR {pan_l:.2f}/FR {pan_f:.2f} (Active calls: {len(active_streams)})")
+                            log(f"call_start: TG {talkgroup_id} [{short_name}] {tag} (src: {src}) at pan LR {pan_l:.2f}/FR {pan_f:.2f} (Active calls: {len(active_streams)})")
                             update_file = True
                         else:
                             # Call already active, just update metadata
@@ -216,7 +218,7 @@ def udp_receive_thread():
                             active_streams[talkgroup_id]["short_name"] = short_name
                             active_streams[talkgroup_id]["src"] = src
                             active_streams[talkgroup_id]["last_seen"] = time.time()
-                            log(f"Received call_start for active {short_name} TG {talkgroup_id} (src: {src})")
+                            log(f"Received call_start for active TG {talkgroup_id} [{short_name}] (src: {src})")
                             update_file = True # Update file on metadata change too
 
                 elif event == "audio":
@@ -252,7 +254,7 @@ def udp_receive_thread():
                                 "src": src,
                                 "audio_event_count": 1
                             }
-                            log(f"Missed call_start! Creating stream for {short_name} TG {talkgroup_id} (Active calls: {len(active_streams)})")
+                            log(f"Missed call_start! Creating stream for TG {talkgroup_id} [{short_name}] (Active calls: {len(active_streams)})")
                             update_file = True # <-- Set flag
                     
                     # --- Update Status File (Outside Lock) ---
@@ -269,7 +271,7 @@ def udp_receive_thread():
                             count = stream_info['audio_event_count']
                             
                             del active_streams[talkgroup_id]
-                            log(f"call_end: {short_name} TG {talkgroup_id} after {count} audio events. (Active calls: {len(active_streams)})")
+                            log(f"call_end: TG {talkgroup_id} [{short_name}] after {count} audio events. (Active calls: {len(active_streams)})")
                             update_file = True
                         else:
                             pass # Ignore end event for a stream we don't have
@@ -388,7 +390,7 @@ def stdout_play_thread():
                     if streams_to_cull:
                         culled_streams = True
                         for tg_id in streams_to_cull:
-                            log(f"{active_streams[tg_id]['short_name']} TG {tg_id} (timeout - Missed call_end?) (Active calls: {len(active_streams) - 1})")
+                            log(f"TG {tg_id} [{active_streams[tg_id]['short_name']}] (timeout - Missed call_end?) (Active calls: {len(active_streams) - 1})")
                             del active_streams[tg_id]
             
             # If we culled, update the status file
