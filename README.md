@@ -14,7 +14,7 @@ The script also generates a text file (active-talkgroups.txt) that can be used b
 
 ## **Example output**
 
-[sample-av-output.mp4](https://github.com/dtmf/quadraphonic-trunked-radio-player/raw/refs/heads/main/sample-av-output.mp4)
+https://github.com/user-attachments/assets/e5ea5247-4d9d-4b7e-8efc-3845d025142a
 
 ## **Requirements**
 
